@@ -1,13 +1,23 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+
 import { Header } from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
 import { Upload as UploadIcon, RefreshCw, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+
+import { auth, db } from "@/lib/firebase";
+import { addDoc, collection } from "firebase/firestore";
 
 export default function Upload() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -15,29 +25,47 @@ export default function Upload() {
   const [damageType, setDamageType] = useState("");
   const [customDamageType, setCustomDamageType] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
   const { toast } = useToast();
 
+  // -------------------------------------------------------
+  // 🔐 PROTECT THIS PAGE (only logged in users allowed)
+  // -------------------------------------------------------
+  useEffect(() => {
+    const storedUser = localStorage.getItem("user");
+    const currentUser = auth.currentUser;
+
+    if (!storedUser && !currentUser) {
+      navigate("/login");
+    }
+  }, [navigate]);
+
+  // -------------------------------------------------------
+  // FILE SELECTION
+  // -------------------------------------------------------
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (file.size > 16 * 1024 * 1024) {
-        toast({
-          title: "File too large",
-          description: "Please select a file smaller than 16MB",
-          variant: "destructive",
-        });
-        return;
-      }
-      setSelectedFile(file);
-      setPreviewUrl(URL.createObjectURL(file));
+    if (!file) return;
+
+    if (file.size > 16 * 1024 * 1024) {
+      toast({
+        title: "File too large",
+        description: "Please select a file smaller than 16MB",
+        variant: "destructive",
+      });
+      return;
     }
+
+    setSelectedFile(file);
+    setPreviewUrl(URL.createObjectURL(file));
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files[0];
+
     if (file && file.type.startsWith("image/")) {
       if (file.size > 16 * 1024 * 1024) {
         toast({
@@ -47,15 +75,17 @@ export default function Upload() {
         });
         return;
       }
+
       setSelectedFile(file);
       setPreviewUrl(URL.createObjectURL(file));
     }
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-  };
+  const handleDragOver = (e: React.DragEvent) => e.preventDefault();
 
+  // -------------------------------------------------------
+  // UPLOAD TO FLASK + SAVE TO FIRESTORE
+  // -------------------------------------------------------
   const handleUpload = async () => {
     if (!selectedFile || !damageType) {
       toast({
@@ -71,36 +101,44 @@ export default function Upload() {
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
-      formData.append("damage_type", damageType === "Other" ? customDamageType : damageType);
+      formData.append(
+        "damage_type",
+        damageType === "Other" ? customDamageType : damageType
+      );
 
-      const response = await fetch("http://localhost:3001/api/upload", {
+      // 🔥 Flask Upload Call
+      const response = await fetch("http://127.0.0.1:5000/upload", {
         method: "POST",
         body: formData,
       });
 
-      if (!response.ok) {
-        throw new Error("Upload failed");
+      if (!response.ok) throw new Error("Upload failed");
+
+      const result = await response.json();
+
+      // -------------------------------------------------------------------
+      // 🔥 Save to Firestore under this user
+      // -------------------------------------------------------------------
+      const user = auth.currentUser;
+      if (user) {
+        await addDoc(collection(db, "users", user.uid, "history"), {
+          image_caption: result.image_caption,
+          loss_description: result.loss_description,
+          damageType:
+            damageType === "Other" ? customDamageType : damageType,
+          image_data: result.image_data,
+          filename: result.filename,
+          timestamp: result.timestamp,
+          date: new Date().toISOString(),
+        });
       }
 
-      const data = await response.json();
-      
-      // Save to history
-      const history = JSON.parse(localStorage.getItem("claimHistory") || "[]");
-      const newEntry = {
-        id: Date.now(),
-        date: new Date().toISOString(),
-        damageType: damageType === "Other" ? customDamageType : damageType,
-        imageUrl: previewUrl,
-        ...data,
-      };
-      history.unshift(newEntry);
-      localStorage.setItem("claimHistory", JSON.stringify(history));
-
-      navigate("/results", { state: { result: newEntry } });
-    } catch (error) {
+      // Navigate to results
+      navigate("/results", { state: { result } });
+    } catch (err: any) {
       toast({
         title: "Upload failed",
-        description: "Could not process the image. Please try again.",
+        description: err.message ?? "Error uploading file",
         variant: "destructive",
       });
     } finally {
@@ -108,20 +146,24 @@ export default function Upload() {
     }
   };
 
+  // -------------------------------------------------------
+  // RESET
+  // -------------------------------------------------------
   const handleReupload = () => {
     setSelectedFile(null);
     setPreviewUrl("");
     setDamageType("");
     setCustomDamageType("");
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
+  // -------------------------------------------------------
+  // UI
+  // -------------------------------------------------------
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple via-purple-light to-cyan">
       <Header />
-      
+
       <main className="container mx-auto px-4 py-8">
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-8">
@@ -131,15 +173,18 @@ export default function Upload() {
           </div>
 
           <Card className="p-8">
-            <h3 className="text-2xl font-bold text-cyan mb-6">Loss Description Generator</h3>
-            
+            <h3 className="text-2xl font-bold text-cyan mb-6">
+              Loss Description Generator
+            </h3>
+
             <div className="space-y-6">
+              {/* UPLOAD BOX */}
               <div>
                 <Label className="text-cyan mb-2 flex items-center gap-2">
                   <UploadIcon className="h-5 w-5" />
                   Upload Damage Images
                 </Label>
-                
+
                 <div
                   onClick={() => fileInputRef.current?.click()}
                   onDrop={handleDrop}
@@ -151,6 +196,7 @@ export default function Upload() {
                       <p className="text-sm text-muted-foreground mb-2">
                         Selected file: {selectedFile?.name}
                       </p>
+
                       <img
                         src={previewUrl}
                         alt="Preview"
@@ -168,6 +214,7 @@ export default function Upload() {
                     </div>
                   )}
                 </div>
+
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -177,12 +224,15 @@ export default function Upload() {
                 />
               </div>
 
+              {/* DAMAGE TYPE */}
               <div className="space-y-2">
                 <Label className="text-cyan">Damage Type</Label>
+
                 <Select value={damageType} onValueChange={setDamageType}>
                   <SelectTrigger className="border-cyan">
                     <SelectValue placeholder="Select damage type" />
                   </SelectTrigger>
+
                   <SelectContent>
                     <SelectItem value="Hail Damage">Hail Damage</SelectItem>
                     <SelectItem value="Fire Damage">Fire Damage</SelectItem>
@@ -195,6 +245,7 @@ export default function Upload() {
                 </Select>
               </div>
 
+              {/* CUSTOM DAMAGE TYPE */}
               {damageType === "Other" && (
                 <div className="space-y-2">
                   <Label className="text-cyan">Specify Damage Type</Label>
@@ -207,6 +258,7 @@ export default function Upload() {
                 </div>
               )}
 
+              {/* BUTTONS */}
               <div className="flex gap-4">
                 <Button
                   variant="outline"
@@ -217,6 +269,7 @@ export default function Upload() {
                   <RefreshCw className="mr-2 h-4 w-4" />
                   Re-upload
                 </Button>
+
                 <Button
                   className="flex-1 bg-cyan hover:bg-cyan-dark"
                   onClick={handleUpload}
@@ -236,11 +289,12 @@ export default function Upload() {
                 </Button>
               </div>
 
+              {/* LOADING */}
               {isLoading && (
                 <div className="text-center py-8">
                   <Loader2 className="h-12 w-12 animate-spin mx-auto text-cyan mb-4" />
                   <p className="text-cyan font-medium">
-                    AI is analyzing the image and generating professional description...
+                    AI is analyzing the image and generating description...
                   </p>
                 </div>
               )}

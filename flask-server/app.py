@@ -1,12 +1,10 @@
-from flask import Flask, render_template, request, jsonify, send_file, make_response
+from flask import Flask, request, jsonify, make_response
+from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from PIL import Image
 import os
-import tempfile
 import uuid
 from datetime import datetime
-from image_captioner import ImageCaptioner
-from description_generator import DescriptionGenerator
 import json
 import base64
 import cv2
@@ -14,53 +12,58 @@ from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
-from textwrap import wrap  # ✅ for text wrapping
+from textwrap import wrap
 import torch
 
+# ML modules
+from image_captioner import ImageCaptioner
+from description_generator import DescriptionGenerator
+
 # ===============================================
-# ✅ Flask Setup
+# 🔧 Flask Setup
 # ===============================================
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here-make-it-random'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+CORS(app)   # <--- IMPORTANT for React
 
-# Allowed file extensions
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB limit
+UPLOAD_DIR = "uploads"
+HISTORY_FILE = "data/detection_history.json"
 
-# Directories
-os.makedirs('uploads', exist_ok=True)
-os.makedirs('data', exist_ok=True)
-HISTORY_FILE = 'data/detection_history.json'
+os.makedirs("uploads", exist_ok=True)
+os.makedirs("data", exist_ok=True)
 
-# Initialize history file if missing
+# Create history file if missing
 if not os.path.exists(HISTORY_FILE):
-    with open(HISTORY_FILE, 'w') as f:
+    with open(HISTORY_FILE, "w") as f:
         json.dump([], f)
 
+ALLOWED_EXT = {"png", "jpg", "jpeg", "gif"}
+
+def allowed_file(name):
+    return "." in name and name.rsplit(".", 1)[1].lower() in ALLOWED_EXT
+
+
 # ===============================================
-# ✅ Model Initialization (Load Once)
+# 🚀 Load AI Models Once
 # ===============================================
-print("🚀 Loading AI models once at startup...")
+print("Loading AI models...")
 torch.set_num_threads(1)
 captioner = ImageCaptioner()
 desc_generator = DescriptionGenerator()
-print("✅ Models loaded successfully!")
+print("Models loaded successfully.")
 
 # ===============================================
-# ✅ Helper Functions
+# 📌 Helper Functions
 # ===============================================
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
 def load_history():
     try:
-        with open(HISTORY_FILE, 'r') as f:
+        with open(HISTORY_FILE, "r") as f:
             return json.load(f)
     except:
         return []
 
 def save_history(history):
-    with open(HISTORY_FILE, 'w') as f:
+    with open(HISTORY_FILE, "w") as f:
         json.dump(history, f)
 
 def add_to_history(entry):
@@ -69,204 +72,160 @@ def add_to_history(entry):
     save_history(history)
 
 # ===============================================
-# ✅ Health Route
+# 🟢 Health Check Route
 # ===============================================
-@app.route('/ping')
+@app.route("/ping")
 def ping():
-    return jsonify({'status': 'Flask is running'})
+    return jsonify({"status": "Flask Running"})
+
 
 # ===============================================
-# ✅ Upload Route
+# 📥 Upload Route
 # ===============================================
-@app.route('/upload', methods=['POST'])
+@app.route("/upload", methods=["POST"])
 def upload_file():
     try:
-        print("📥 Received upload request")
-        print("Request form:", request.form)
-        print("Request files:", request.files)
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
 
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file selected'}), 400
+        file = request.files["file"]
+        damage_type = request.form.get("damage_type", "Unknown Damage")
+        custom_damage = request.form.get("custom_damage", "")
 
-        file = request.files['file']
-        damage_type = request.form.get('damage_type', 'Unknown Damage')
-        custom_damage = request.form.get('custom_damage', '')
+        if file.filename == "":
+            return jsonify({"error": "Empty file selection"}), 400
 
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
+        if not allowed_file(file.filename):
+            return jsonify({"error": "Unsupported file format"}), 400
 
-        if file and allowed_file(file.filename):
-            # Generate unique filename
-            file_id = str(uuid.uuid4())
-            filename = secure_filename(file.filename)
-            temp_path = os.path.join('uploads', f"{file_id}_{filename}")
-            file.save(temp_path)
+        # Save temporary file
+        file_id = str(uuid.uuid4())
+        filename = secure_filename(file.filename)
+        temp_path = os.path.join(UPLOAD_DIR, f"{file_id}_{filename}")
+        file.save(temp_path)
 
-            # Validate image
-            try:
-                with Image.open(temp_path) as img:
-                    img.verify()
-            except Exception:
-                os.remove(temp_path)
-                return jsonify({'error': 'Invalid image file'}), 400
-
-            # Process image through AI models
-            image_caption = captioner.generate_caption(temp_path)
-            final_damage_type = custom_damage if custom_damage else damage_type
-            loss_description = desc_generator.enhance_description(image_caption, final_damage_type)
-
-            # Encode image as base64
-            image = cv2.imread(temp_path)
-            _, buffer = cv2.imencode('.jpg', image)
-            image_data = base64.b64encode(buffer).decode('utf-8')
-
-            result_data = {
-                'success': True,
-                'image_caption': image_caption,
-                'damage_type': final_damage_type,
-                'loss_description': loss_description,
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'filename': filename,
-                'image_data': image_data
-            }
-
-            # Add to history
-            add_to_history({
-                'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'damage_type': final_damage_type,
-                'image_caption': image_caption,
-                'loss_description': loss_description,
-                'image_data': image_data
-            })
-
-            # Cleanup
+        # Validate image
+        try:
+            with Image.open(temp_path) as img:
+                img.verify()
+        except:
             os.remove(temp_path)
+            return jsonify({"error": "Invalid or corrupted image"}), 400
 
-            print("✅ Successfully processed and returning response")
-            return jsonify(result_data)
-        else:
-            return jsonify({'error': 'Invalid file type. Please upload PNG, JPG, or JPEG.'}), 400
+        # ML processing
+        final_damage = custom_damage if custom_damage else damage_type
+        caption = captioner.generate_caption(temp_path)
+        description = desc_generator.enhance_description(caption, final_damage)
+
+        # Encode image → base64
+        img_cv = cv2.imread(temp_path)
+        _, buffer = cv2.imencode(".jpg", img_cv)
+        image_b64 = base64.b64encode(buffer).decode("utf-8")
+
+        # Prepare response
+        result = {
+            "success": True,
+            "filename": filename,
+            "damage_type": final_damage,
+            "image_caption": caption,
+            "loss_description": description,
+            "image_data": image_b64,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        # Save in history
+        add_to_history(result)
+
+        # Delete temp file
+        os.remove(temp_path)
+
+        return jsonify(result)
 
     except Exception as e:
-        print(f"❌ Flask processing error: {str(e)}")
-        return jsonify({'error': f'Processing error: {str(e)}'}), 500
+        print("❌ Upload error:", e)
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
 
 # ===============================================
-# ✅ PDF Download Route
+# 📄 PDF Generation Route
 # ===============================================
-@app.route('/download-pdf', methods=['POST'])
-def download_pdf():
+@app.route("/download-pdf", methods=["POST"])
+def generate_pdf():
     try:
         data = request.get_json()
-        description = data.get('description', '')
-        damage_type = data.get('damage_type', 'loss_description')
-        image_data = data.get('image_data', '')
+        description = data.get("description", "")
+        damage_type = data.get("damage_type", "")
+        image_data = data.get("image_data", "")
 
         buffer = BytesIO()
-        p = canvas.Canvas(buffer, pagesize=A4)
+        pdf = canvas.Canvas(buffer, pagesize=A4)
         width, height = A4
 
         # Header
-        p.setFillColorRGB(0/255, 119/255, 182/255)
-        p.rect(0, height-100, width, 100, fill=1)
-        p.setFillColorRGB(1, 1, 1)
-        p.setFont("Helvetica-Bold", 20)
-        p.drawString(50, height-60, "Insurance Loss Description Report")
-        p.setFont("Helvetica", 12)
-        p.drawString(50, height-80, "Generated by ClaimInsight AI System")
+        pdf.setFillColorRGB(0, 0.5, 0.8)
+        pdf.rect(0, height - 100, width, 100, fill=1)
+        pdf.setFillColorRGB(1, 1, 1)
+        pdf.setFont("Helvetica-Bold", 20)
+        pdf.drawString(50, height - 60, "Insurance Loss Description Report")
 
-        # Damage Info
-        y = height - 130
-        p.setFillColorRGB(0/255, 119/255, 182/255)
-        p.setFont("Helvetica-Bold", 14)
-        p.drawString(50, y, "Damage Assessment Details")
-        p.setFillColorRGB(0, 0, 0)
+        y = height - 140
+        pdf.setFillColorRGB(0, 0, 0)
+        pdf.setFont("Helvetica", 12)
+        pdf.drawString(50, y, f"Damage Type: {damage_type}")
         y -= 20
-        p.setFont("Helvetica", 12)
-        p.drawString(50, y, f"Damage Type: {damage_type}")
-        y -= 20
-        p.drawString(50, y, f"Report Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        pdf.drawString(50, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # Loss Description
+        # Description text
         y -= 40
-        p.setFillColorRGB(0/255, 119/255, 182/255)
-        p.setFont("Helvetica-Bold", 14)
-        p.drawString(50, y, "Professional Loss Description")
-        y -= 20
-        p.setFillColorRGB(0, 0, 0)
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawString(50, y, "Detailed Loss Description")
+        y -= 25
 
-        wrapped_lines = []
-        max_width = 90
-        for paragraph in description.split('\n'):
-            for wrapped_line in wrap(paragraph, width=max_width):
-                wrapped_lines.append(wrapped_line)
+        wrapped = wrap(description, width=90)
+        pdf.setFont("Helvetica", 11)
 
-        for line in wrapped_lines:
-            if line.strip():
-                if y < 100:
-                    p.showPage()
-                    y = height - 50
-                p.setFont("Helvetica", 10)
-                p.drawString(50, y, line.strip())
-                y -= 15
+        for line in wrapped:
+            if y < 100:
+                pdf.showPage()
+                y = height - 50
+            pdf.drawString(50, y, line)
+            y -= 15
 
-        # Damage Image
-        if image_data and y > 200:
-            try:
-                y -= 30
-                p.setFillColorRGB(0/255, 119/255, 182/255)
-                p.setFont("Helvetica-Bold", 14)
-                p.drawString(50, y, "Damage Image")
-                y -= 20
-                img_data = base64.b64decode(image_data)
-                img = Image.open(BytesIO(img_data))
+        # Add image
+        if image_data:
+            y -= 40
+            img_bytes = base64.b64decode(image_data)
+            img = Image.open(BytesIO(img_bytes))
 
-                max_width = 300
-                max_height = 200
-                img_width, img_height = img.size
-                aspect = img_width / img_height
-                if aspect > max_width / max_height:
-                    img_width = max_width
-                    img_height = img_width / aspect
-                else:
-                    img_height = max_height
-                    img_width = img_height * aspect
+            max_w, max_h = 300, 200
+            iw, ih = img.size
+            aspect = iw / ih
 
-                p.drawImage(ImageReader(img), 50, y - img_height, width=img_width, height=img_height)
-            except Exception as e:
-                print(f"Error adding image to PDF: {str(e)}")
+            if aspect > max_w / max_h:
+                iw = max_w
+                ih = iw / aspect
+            else:
+                ih = max_h
+                iw = ih * aspect
 
-        # Footer
-        p.setFont("Helvetica", 8)
-        p.drawString(50, 30, "Confidential - For Insurance Claim Purposes")
-        p.drawString(400, 30, f"Generated on: {datetime.now().strftime('%d %b %Y')}")
+            pdf.drawImage(ImageReader(img), 50, y - ih, width=iw, height=ih)
 
-        p.save()
+        pdf.save()
         buffer.seek(0)
 
         response = make_response(buffer.getvalue())
-        response.mimetype = 'application/pdf'
-        response.headers['Content-Disposition'] = f"attachment; filename=loss_description_{damage_type.replace(' ', '_')}.pdf"
+        response.mimetype = "application/pdf"
+        response.headers["Content-Disposition"] = "attachment; filename=loss_report.pdf"
 
         return response
 
     except Exception as e:
-        print(f"Error generating PDF: {str(e)}")
-        return jsonify({'error': f'PDF generation failed: {str(e)}'}), 500
+        print("❌ PDF error:", e)
+        return jsonify({"error": "PDF generation failed"}), 500
+
 
 # ===============================================
-# ✅ Error Handlers
+# 🚀 Run Flask
 # ===============================================
-@app.errorhandler(413)
-def too_large(e):
-    return jsonify({'error': 'File too large. Maximum size is 16MB.'}), 413
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
-
-# ===============================================
-# ✅ Run Flask Server
-# ===============================================
-if __name__ == '__main__':
-    app.run(debug=False, use_reloader=False, host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
