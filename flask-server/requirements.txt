@@ -4,8 +4,8 @@ flask-cors==4.0.0
 Pillow==11.3.0
 opencv-python-headless==4.10.0.84
 
-torch==2.5.1
-transformers==4.40.0
+torch==2.2.2      # works on Python 3.10
+transformers==4.38.0
 huggingface-hub==0.23.0
 
 reportlab==4.2.2
