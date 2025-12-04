@@ -4,20 +4,15 @@ flask-cors==4.0.0
 Pillow==11.3.0
 opencv-python-headless==4.10.0.84
 
-torch==2.2.2
+torch==2.5.1
 transformers==4.40.0
 huggingface-hub==0.23.0
 
 reportlab==4.2.2
-
 numpy==1.26.4
-
-# Needed by transformers
 requests==2.31.0
 tqdm==4.66.1
 regex==2023.10.3
 filelock==3.13.1
 
-# Production server
 gunicorn==21.2.0
-
